@@ -1,0 +1,60 @@
+{
+  "name": "claude-talk-to-figma-mcp",
+  "description": "Claude Desktop Talk to Figma MCP",
+  "version": "0.4.0",
+  "module": "dist/talk_to_figma_mcp/server.js",
+  "main": "dist/talk_to_figma_mcp/server.js",
+  "bin": {
+    "claude-talk-to-figma-mcp": "dist/talk_to_figma_mcp/server.js",
+    "claude-talk-to-figma-mcp-socket": "dist/socket.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "TESTING.md"
+  ],
+  "type": "module",
+  "scripts": {
+    "start": "bun run dist/talk_to_figma_mcp/server.js",
+    "socket": "bun run dist/socket.js",
+    "setup": "./scripts/setup.sh",
+    "build": "tsup && chmod +x dist/talk_to_figma_mcp/server.js dist/socket.js",
+    "build:watch": "tsup --watch",
+    "dev": "bun run build:watch",
+    "pub:release": "bun run build && npm publish",
+    "configure-claude": "node scripts/configure-claude.js",
+    "test": "node scripts/test-integration.js"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "bun-types": "^1.2.9",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "uuid": "latest",
+    "ws": "latest",
+    "zod": "latest"
+  },
+  "keywords": [
+    "claude",
+    "figma",
+    "mcp",
+    "plugin",
+    "ai",
+    "design",
+    "automation"
+  ],
+  "author": "Xúlio Zé",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arinspunk/claude-talk-to-figma-mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/arinspunk/claude-talk-to-figma-mcp/issues"
+  },
+  "homepage": "https://github.com/arinspunk/claude-talk-to-figma-mcp#readme"
+}
