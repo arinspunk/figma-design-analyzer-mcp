@@ -297,30 +297,45 @@ async function getLocalComponents() {
 }
 
 async function exportNodeAsImage(params) {
-  const { nodeId, scale = 1 } = params || {};
+  console.log(`[DIAGNÓSTICO] Iniciando exportNodeAsImage con parámetros:`, JSON.stringify(params));
+  const { nodeId, format = "PNG", scale = 1 } = params || {};
 
-  const format = "PNG";
+  console.log(`[DIAGNÓSTICO] Parámetros normalizados: nodeId=${nodeId}, format=${format}, scale=${scale}`);
 
   if (!nodeId) {
+    console.error(`[DIAGNÓSTICO] Error: Falta el parámetro nodeId`);
     throw new Error("Missing nodeId parameter");
   }
 
-  const node = await figma.getNodeByIdAsync(nodeId);
-  if (!node) {
-    throw new Error(`Node not found with ID: ${nodeId}`);
-  }
-
-  if (!("exportAsync" in node)) {
-    throw new Error(`Node does not support exporting: ${nodeId}`);
-  }
-
   try {
+    console.log(`[DIAGNÓSTICO] Buscando nodo con ID: ${nodeId}`);
+    const node = await figma.getNodeByIdAsync(nodeId);
+    
+    if (!node) {
+      console.error(`[DIAGNÓSTICO] Error: Nodo no encontrado con ID: ${nodeId}`);
+      throw new Error(`Node not found with ID: ${nodeId}`);
+    }
+
+    console.log(`[DIAGNÓSTICO] Nodo encontrado. Tipo: ${node.type}, Nombre: ${node.name}`);
+
+    if (!("exportAsync" in node)) {
+      console.error(`[DIAGNÓSTICO] Error: El nodo no soporta exportación: ${nodeId}`);
+      throw new Error(`Node does not support exporting: ${nodeId}`);
+    }
+
+    console.log(`[DIAGNÓSTICO] Configurando parámetros de exportación: format=${format}, scale=${scale}`);
+    
     const settings = {
       format: format,
       constraint: { type: "SCALE", value: scale },
     };
 
+    console.log(`[DIAGNÓSTICO] Iniciando exportación con settings:`, JSON.stringify(settings));
+    
     const bytes = await node.exportAsync(settings);
+    
+    console.log(`[DIAGNÓSTICO] Exportación completada. Tamaño en bytes: ${bytes.length}`);
+    console.log(`[DIAGNÓSTICO] Tipo de datos recibido:`, Object.prototype.toString.call(bytes));
 
     let mimeType;
     switch (format) {
@@ -339,22 +354,33 @@ async function exportNodeAsImage(params) {
       default:
         mimeType = "application/octet-stream";
     }
+    
+    console.log(`[DIAGNÓSTICO] MIME Type determinado: ${mimeType}`);
 
-    // Proper way to convert Uint8Array to base64
+    // Codificación a Base64
+    console.log(`[DIAGNÓSTICO] Iniciando codificación Base64`);
     const base64 = customBase64Encode(bytes);
-    // const imageData = `data:${mimeType};base64,${base64}`;
+    console.log(`[DIAGNÓSTICO] Codificación Base64 completada. Longitud: ${base64.length}`);
+    console.log(`[DIAGNÓSTICO] Muestra de datos Base64:`, base64.substring(0, 30) + '...');
 
-    return {
+    const result = {
       nodeId,
       format,
       scale,
       mimeType,
       imageData: base64,
     };
+
+    console.log(`[DIAGNÓSTICO] Devolviendo resultado de exportación con ${base64.length} caracteres`);
+    return result;
   } catch (error) {
+    console.error(`[DIAGNÓSTICO] Error detallado en exportNodeAsImage:`, error);
+    console.error(`[DIAGNÓSTICO] Mensaje de error:`, error.message);
+    console.error(`[DIAGNÓSTICO] Stack trace:`, error.stack);
     throw new Error(`Error exporting node as image: ${error.message}`);
   }
 }
+
 function customBase64Encode(bytes) {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
