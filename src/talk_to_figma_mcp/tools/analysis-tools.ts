@@ -4,14 +4,14 @@
 
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { sendCommandToFigma } from "../core/figma-connection";
-import { hexToRgb } from "../utils/figma-utils";
+import { sendCommandToFigma } from "../core/figma-connection.js";
+import { hexToRgb } from "../utils/figma-utils.js";
 
 /**
  * Registra las herramientas de análisis en el servidor MCP
  */
 export function registerAnalysisTools(server: McpServer): void {
-  // Analyze Design System Tool
+  // Analyze Design System Tool (mejorado para ser más flexible)
   server.tool(
     "analyze_design_system",
     "Examinar un documento de Figma para identificar y estructurar su sistema de diseño subyacente",
@@ -19,8 +19,9 @@ export function registerAnalysisTools(server: McpServer): void {
       documentId: z.string().optional().describe("Identificador del documento Figma (si se omite, se usa el documento actual)"),
       detailLevel: z.enum(["basic", "detailed", "comprehensive"]).default("detailed").describe("Nivel de detalle del análisis"),
       includeComponents: z.boolean().default(true).describe("Booleano para incluir análisis de componentes"),
+      inferStyles: z.boolean().default(true).describe("Intentar inferir estilos no formalmente definidos"),
     },
-    async ({ documentId, detailLevel, includeComponents }) => {
+    async ({ documentId, detailLevel, includeComponents, inferStyles }) => {
       try {
         // Mensaje inicial para indicar que el proceso ha comenzado
         const initialStatus = {
@@ -34,7 +35,23 @@ export function registerAnalysisTools(server: McpServer): void {
           : await sendCommandToFigma("get_document_info");
 
         // Obtener todos los estilos del documento
-        const stylesResult = await sendCommandToFigma("get_styles");
+        let stylesResult = await sendCommandToFigma("get_styles");
+        
+        // Si no hay estilos formales y se ha solicitado inferencia, inferirlos
+        if (inferStyles && 
+           (!stylesResult.colors || stylesResult.colors.length === 0) && 
+           (!stylesResult.texts || stylesResult.texts.length === 0)) {
+          
+          const inferredStyles = await inferStylesFromDocument(documentInfo);
+          
+          // Combinar estilos formales con inferidos
+          stylesResult = {
+            colors: [...(stylesResult.colors || []), ...(inferredStyles.colors || [])],
+            texts: [...(stylesResult.texts || [])],
+            effects: [...(stylesResult.effects || []), ...(inferredStyles.effects || [])],
+            grids: [...(stylesResult.grids || []), ...(inferredStyles.grids || [])]
+          };
+        }
         
         // Obtener componentes locales si se solicita
         let componentsResult = null;
@@ -44,10 +61,23 @@ export function registerAnalysisTools(server: McpServer): void {
 
         // Analizar los datos recopilados para identificar el sistema de diseño
         const designSystem = analyzeDesignSystem(documentInfo, stylesResult, componentsResult, detailLevel);
+        
+        // Añadir recomendaciones específicas si el sistema de diseño es limitado
+        const isLimitedDesignSystem = designSystem.designSystem.consistency.score < 50;
+        
+        if (isLimitedDesignSystem) {
+          designSystem.designSystem.recommendations = generateRecommendationsForLimitedSystem(designSystem.designSystem);
+        }
 
         return {
           content: [
             initialStatus,
+            {
+              type: "text" as const,
+              text: isLimitedDesignSystem ? 
+                "Se ha detectado que el documento no tiene un sistema de diseño formalmente definido. Se ha realizado un análisis basado en los elementos detectados y se han generado recomendaciones para mejorar la consistencia." :
+                "Análisis del sistema de diseño completado."
+            },
             {
               type: "text" as const,
               text: JSON.stringify(designSystem, null, 2)
@@ -67,7 +97,7 @@ export function registerAnalysisTools(server: McpServer): void {
     }
   );
 
-  // Extract Design Tokens Tool
+  // Extract Design Tokens Tool (mejorada para inferir tokens)
   server.tool(
     "extract_design_tokens",
     "Extraer tokens de diseño específicos de un documento o componente de Figma",
@@ -78,9 +108,10 @@ export function registerAnalysisTools(server: McpServer): void {
       ).default(["colors", "typography", "spacing", "shadows", "radii"])
       .describe("Array de tipos de tokens a extraer"),
       format: z.enum(["css", "scss", "json", "js", "ts"]).default("json")
-      .describe("Formato de salida")
+      .describe("Formato de salida"),
+      inferTokens: z.boolean().default(true).describe("Inferir tokens aunque no estén explícitamente definidos")
     },
-    async ({ nodeId, tokenTypes, format }) => {
+    async ({ nodeId, tokenTypes, format, inferTokens }) => {
       try {
         // Mensaje inicial para indicar que el proceso ha comenzado
         const initialStatus = {
@@ -92,10 +123,34 @@ export function registerAnalysisTools(server: McpServer): void {
         const nodeInfo = await sendCommandToFigma("get_node_info", { nodeId });
         
         // Obtener estilos del documento para análisis
-        const stylesResult = await sendCommandToFigma("get_styles");
+        let stylesResult = await sendCommandToFigma("get_styles");
+        
+        // Si no hay suficientes estilos definidos y se solicita inferencia, inferir tokens
+        const hasLimitedStyles = (!stylesResult.colors || stylesResult.colors.length === 0 || 
+                                !stylesResult.texts || stylesResult.texts.length === 0);
+        
+        let inferredTokensInfo = null;
+        
+        if (inferTokens && hasLimitedStyles) {
+          // Inferir tokens analizando el nodo
+          inferredTokensInfo = await inferTokensFromNode(nodeInfo);
+          
+          // Combinar estilos formales con inferidos
+          stylesResult = {
+            colors: [...(stylesResult.colors || []), ...(inferredTokensInfo.colors || [])],
+            texts: [...(stylesResult.texts || [])],
+            effects: [...(stylesResult.effects || []), ...(inferredTokensInfo.effects || [])],
+            grids: [...(stylesResult.grids || []), ...(inferredTokensInfo.grids || [])]
+          };
+        }
         
         // Extraer los tokens solicitados
         const tokens = extractTokens(nodeInfo, stylesResult, tokenTypes);
+        
+        // Añadir información de análisis de color para tokens inferidos
+        if (inferTokens && hasLimitedStyles && tokens.colors && tokens.colors.length > 0) {
+          tokens.colorAnalysis = analyzeColors(tokens.colors);
+        }
         
         // Generar el código en el formato solicitado
         const codeOutput = generateTokenCode(tokens, format);
@@ -113,6 +168,12 @@ export function registerAnalysisTools(server: McpServer): void {
         return {
           content: [
             initialStatus,
+            {
+              type: "text" as const,
+              text: inferTokens && hasLimitedStyles ? 
+                "Se han inferido tokens adicionales ya que no se encontraron suficientes estilos definidos formalmente." :
+                "Tokens extraídos correctamente."
+            },
             {
               type: "text" as const,
               text: JSON.stringify(response, null, 2)
@@ -134,143 +195,182 @@ export function registerAnalysisTools(server: McpServer): void {
 }
 
 /**
- * Analiza el sistema de diseño a partir de los datos recopilados
+ * Genera recomendaciones para mejorar un sistema de diseño limitado
  */
-function analyzeDesignSystem(documentInfo: any, stylesData: any, componentsData: any, detailLevel: string): any {
-  // Extraer el nombre del documento
-  const docName = documentInfo.name || "Documento sin nombre";
-  
-  // Analizar colores
-  const colorTokens = extractColorTokens(stylesData);
-  
-  // Analizar tipografía
-  const typographyTokens = extractTypographyTokens(stylesData);
-  
-  // Analizar espaciado
-  const spacingTokens = extractSpacingTokens(documentInfo, detailLevel);
-  
-  // Analizar sombras
-  const shadowTokens = extractShadowTokens(stylesData);
-  
-  // Analizar radios de borde
-  const radiiTokens = extractRadiiTokens(stylesData, documentInfo);
-  
-  // Analizar componentes si están disponibles
-  let components = {
-    atomic: [],
-    composite: [],
-    patterns: []
+function generateRecommendationsForLimitedSystem(designSystem: any): any {
+  const recommendations = {
+    priority: [],
+    consistency: [],
+    implementation: []
   };
-  
-  if (componentsData) {
-    components = analyzeComponents(componentsData, detailLevel);
+
+  // Verificar tokens disponibles
+  const tokens = designSystem.tokens;
+  const consistency = designSystem.consistency;
+
+  // Recomendaciones prioritarias basadas en las deficiencias
+  if (!tokens.colors || tokens.colors.length === 0) {
+    recommendations.priority.push(
+      "Definir una paleta de colores principal con al menos 5 tonos base y sus variaciones"
+    );
   }
   
-  // Evaluar la consistencia
-  const consistency = evaluateConsistency(colorTokens, typographyTokens, spacingTokens, shadowTokens, radiiTokens, components);
+  if (!tokens.typography || tokens.typography.length === 0) {
+    recommendations.priority.push(
+      "Establecer estilos tipográficos para al menos títulos (h1-h3) y texto de cuerpo"
+    );
+  }
   
-  // Generar sugerencias de implementación
-  const implementationSuggestions = generateImplementationSuggestions(colorTokens, typographyTokens, components);
+  if (!tokens.spacing || tokens.spacing.length < 3) {
+    recommendations.priority.push(
+      "Crear un sistema de espaciado consistente con al menos 4-5 valores incrementales"
+    );
+  }
   
-  // Construir y devolver el objeto del sistema de diseño
-  return {
-    designSystem: {
-      name: `${docName} Design System`,
-      version: "1.0",
-      description: `Sistema de diseño extraído de ${docName}`,
-      consistency,
-      tokens: {
-        colors: colorTokens,
-        typography: typographyTokens,
-        spacing: spacingTokens,
-        shadows: shadowTokens,
-        radii: radiiTokens
-      },
-      components,
-      implementationSuggestions
+  if (!tokens.shadows || tokens.shadows.length === 0) {
+    recommendations.priority.push(
+      "Añadir estilos de sombra para establecer jerarquía visual (al menos 2-3 niveles de elevación)"
+    );
+  }
+  
+  // Recomendaciones de consistencia
+  recommendations.consistency = [
+    "Utilizar colores, espaciados y tipografía consistentes en todos los elementos del diseño",
+    "Agrupar estilos por categorías semánticas (ej: colores primarios, secundarios, etc.)",
+    "Evitar valores arbitrarios y preferir un sistema escalable (4px, 8px, 16px...)"
+  ];
+  
+  // Recomendaciones de implementación
+  recommendations.implementation = [
+    "Crear un archivo de estilos compartido en Figma para reutilización",
+    "Implementar componentes reusables para elementos comunes (botones, inputs, tarjetas)",
+    "Documentar las reglas del sistema para asegurar consistencia entre diseñadores"
+  ];
+  
+  return recommendations;
+}
+
+/**
+ * Extrae tokens de diseño según los tipos especificados
+ */
+function extractTokens(nodeInfo: any, stylesData: any, tokenTypes: string[]): any {
+  const tokens: Record<string, any[]> = {};
+  
+  // Extraer cada tipo de token solicitado
+  for (const tokenType of tokenTypes) {
+    switch (tokenType) {
+      case 'colors':
+        tokens.colors = extractColorTokens(stylesData);
+        break;
+      case 'typography':
+        tokens.typography = extractTypographyTokens(stylesData);
+        break;
+      case 'spacing':
+        tokens.spacing = extractSpacingTokens(nodeInfo, 'detailed');
+        break;
+      case 'shadows':
+        tokens.shadows = extractShadowTokens(stylesData);
+        break;
+      case 'radii':
+        tokens.radii = extractRadiiTokens(stylesData, nodeInfo);
+        break;
     }
-  };
+  }
+  
+  return tokens;
 }
 
 /**
  * Extrae tokens de color de los estilos
  */
 function extractColorTokens(stylesData: any): any[] {
-  // Filtrar estilos de color
-  const colorStyles = Array.isArray(stylesData) 
-    ? stylesData.filter((style: any) => style.type === 'FILL')
-    : [];
+  // Inicializar array de tokens
+  const colorTokens = [];
   
-  // Transformar estilos en tokens
-  return colorStyles.map((style: any) => {
-    // Obtener el color del estilo
-    let colorValue = '#000000';
-    let opacity = 1;
+  // Verificar si hay estilos definidos
+  if (stylesData && 'colors' in stylesData && Array.isArray(stylesData.colors)) {
+    // Filtrar estilos de color
+    const colorStyles = stylesData.colors;
     
-    if (style.paints && style.paints.length > 0) {
-      const paint = style.paints[0];
-      if (paint.type === 'SOLID' && paint.color) {
-        // Convertir color RGB (0-1) a HEX
-        const r = Math.round(paint.color.r * 255);
-        const g = Math.round(paint.color.g * 255);
-        const b = Math.round(paint.color.b * 255);
-        colorValue = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-        opacity = paint.opacity !== undefined ? paint.opacity : 1;
+    // Transformar estilos en tokens
+    colorStyles.forEach((style: any) => {
+      // Obtener el color del estilo
+      let colorValue = '#000000';
+      let opacity = 1;
+      
+      if (style.paints && style.paints.length > 0) {
+        const paint = style.paints[0];
+        if (paint.type === 'SOLID' && paint.color) {
+          // Convertir color RGB (0-1) a HEX
+          const r = Math.round(paint.color.r * 255);
+          const g = Math.round(paint.color.g * 255);
+          const b = Math.round(paint.color.b * 255);
+          colorValue = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+          opacity = paint.opacity !== undefined ? paint.opacity : 1;
+        }
       }
-    }
-    
-    // Generar nombre semántico para el token
-    const nameParts = style.name.split('/');
-    const name = nameParts[nameParts.length - 1].toLowerCase().replace(/\s+/g, '-');
-    const category = nameParts.length > 1 ? nameParts[0].toLowerCase() : 'base';
-    
-    return {
-      name,
-      category,
-      value: colorValue,
-      opacity: opacity !== 1 ? opacity : undefined,
-      type: 'color',
-      description: `Color: ${style.name}`,
-      figmaStyleId: style.id
-    };
-  });
+      
+      // Generar nombre semántico para el token
+      const nameParts = style.name ? style.name.split('/') : ["color"];
+      const name = nameParts[nameParts.length - 1].toLowerCase().replace(/\s+/g, '-');
+      const category = nameParts.length > 1 ? nameParts[0].toLowerCase() : 'base';
+      
+      colorTokens.push({
+        name,
+        category,
+        value: colorValue,
+        opacity: opacity !== 1 ? opacity : undefined,
+        type: 'color',
+        description: `Color: ${style.name || colorValue}`,
+        figmaStyleId: style.id
+      });
+    });
+  }
+  
+  return colorTokens;
 }
 
 /**
  * Extrae tokens de tipografía de los estilos
  */
 function extractTypographyTokens(stylesData: any): any[] {
-  // Filtrar estilos de texto
-  const textStyles = Array.isArray(stylesData) 
-    ? stylesData.filter((style: any) => style.type === 'TEXT')
-    : [];
+  // Inicializar array de tokens
+  const typographyTokens = [];
   
-  // Transformar estilos en tokens
-  return textStyles.map((style: any) => {
-    const styleData = style.style || {};
+  // Verificar si hay estilos definidos
+  if (stylesData && 'texts' in stylesData && Array.isArray(stylesData.texts)) {
+    // Filtrar estilos de texto
+    const textStyles = stylesData.texts;
     
-    // Generar nombre semántico para el token
-    const nameParts = style.name.split('/');
-    const name = nameParts[nameParts.length - 1].toLowerCase().replace(/\s+/g, '-');
-    const category = nameParts.length > 1 ? nameParts[0].toLowerCase() : 'base';
-    
-    return {
-      name,
-      category,
-      type: 'typography',
-      description: `Estilo de texto: ${style.name}`,
-      value: {
-        fontFamily: styleData.fontFamily || 'default',
-        fontSize: styleData.fontSize ? `${styleData.fontSize}px` : undefined,
-        fontWeight: styleData.fontWeight,
-        lineHeight: styleData.lineHeight ? `${styleData.lineHeight}px` : undefined,
-        letterSpacing: styleData.letterSpacing ? `${styleData.letterSpacing}px` : undefined,
-        textCase: styleData.textCase,
-        textDecoration: styleData.textDecoration
-      },
-      figmaStyleId: style.id
-    };
-  });
+    // Transformar estilos en tokens
+    textStyles.forEach((style: any) => {
+      const styleData = style.style || {};
+      
+      // Generar nombre semántico para el token
+      const nameParts = style.name ? style.name.split('/') : ["typography"];
+      const name = nameParts[nameParts.length - 1].toLowerCase().replace(/\s+/g, '-');
+      const category = nameParts.length > 1 ? nameParts[0].toLowerCase() : 'base';
+      
+      typographyTokens.push({
+        name,
+        category,
+        type: 'typography',
+        description: `Estilo de texto: ${style.name || "Estilo tipográfico"}`,
+        value: {
+          fontFamily: styleData.fontFamily || 'default',
+          fontSize: styleData.fontSize ? `${styleData.fontSize}px` : undefined,
+          fontWeight: styleData.fontWeight,
+          lineHeight: styleData.lineHeight ? `${styleData.lineHeight}px` : undefined,
+          letterSpacing: styleData.letterSpacing ? `${styleData.letterSpacing}px` : undefined,
+          textCase: styleData.textCase,
+          textDecoration: styleData.textDecoration
+        },
+        figmaStyleId: style.id
+      });
+    });
+  }
+  
+  return typographyTokens;
 }
 
 /**
@@ -338,52 +438,62 @@ function extractSpacingTokens(documentInfo: any, detailLevel: string): any[] {
  * Extrae tokens de sombra de los estilos
  */
 function extractShadowTokens(stylesData: any): any[] {
-  // Filtrar estilos de efecto (sombras)
-  const effectStyles = Array.isArray(stylesData) 
-    ? stylesData.filter((style: any) => style.type === 'EFFECT')
-    : [];
+  // Inicializar array de tokens
+  const shadowTokens = [];
   
-  // Transformar estilos en tokens
-  return effectStyles.map((style: any) => {
-    let shadowValue = {};
+  // Verificar si hay estilos definidos
+  if (stylesData && 'effects' in stylesData && Array.isArray(stylesData.effects)) {
+    // Filtrar estilos de efecto (sombras)
+    const effectStyles = stylesData.effects;
     
-    if (style.effects && style.effects.length > 0) {
-      // Tomamos el primer efecto
-      const effect = style.effects[0];
-      if (effect.type === 'DROP_SHADOW' || effect.type === 'INNER_SHADOW') {
-        // Convertir color RGB a HEX
-        const r = Math.round(effect.color.r * 255);
-        const g = Math.round(effect.color.g * 255);
-        const b = Math.round(effect.color.b * 255);
-        const a = effect.color.a || 1;
-        const colorHex = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-        
-        shadowValue = {
-          type: effect.type === 'DROP_SHADOW' ? 'dropShadow' : 'innerShadow',
-          color: colorHex,
-          alpha: a,
-          x: `${effect.offset.x}px`,
-          y: `${effect.offset.y}px`,
-          blur: `${effect.radius}px`,
-          spread: effect.spread ? `${effect.spread}px` : '0px'
-        };
+    // Transformar estilos en tokens
+    effectStyles.forEach((style: any) => {
+      let shadowValue = {};
+      
+      if (style.effects && style.effects.length > 0) {
+        // Tomamos el primer efecto
+        const effect = style.effects[0];
+        if (effect.type === 'DROP_SHADOW' || effect.type === 'INNER_SHADOW') {
+          // Convertir color RGB a HEX si existe
+          let colorHex = '#000000';
+          let alpha = 1;
+          if (effect.color) {
+            const r = Math.round(effect.color.r * 255);
+            const g = Math.round(effect.color.g * 255);
+            const b = Math.round(effect.color.b * 255);
+            alpha = effect.color.a || 1;
+            colorHex = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+          }
+          
+          shadowValue = {
+            type: effect.type === 'DROP_SHADOW' ? 'dropShadow' : 'innerShadow',
+            color: colorHex,
+            alpha: alpha,
+            x: effect.offset ? `${effect.offset.x}px` : '0px',
+            y: effect.offset ? `${effect.offset.y}px` : '0px',
+            blur: `${effect.radius || 0}px`,
+            spread: effect.spread ? `${effect.spread}px` : '0px'
+          };
+        }
       }
-    }
-    
-    // Generar nombre semántico para el token
-    const nameParts = style.name.split('/');
-    const name = nameParts[nameParts.length - 1].toLowerCase().replace(/\s+/g, '-');
-    const category = nameParts.length > 1 ? nameParts[0].toLowerCase() : 'base';
-    
-    return {
-      name,
-      category,
-      value: shadowValue,
-      type: 'shadow',
-      description: `Sombra: ${style.name}`,
-      figmaStyleId: style.id
-    };
-  });
+      
+      // Generar nombre semántico para el token
+      const nameParts = style.name ? style.name.split('/') : ["shadow"];
+      const name = nameParts[nameParts.length - 1].toLowerCase().replace(/\s+/g, '-');
+      const category = nameParts.length > 1 ? nameParts[0].toLowerCase() : 'base';
+      
+      shadowTokens.push({
+        name,
+        category,
+        value: shadowValue,
+        type: 'shadow',
+        description: `Sombra: ${style.name || "Efecto de sombra"}`,
+        figmaStyleId: style.id
+      });
+    });
+  }
+  
+  return shadowTokens;
 }
 
 /**
@@ -437,234 +547,6 @@ function extractRadiiTokens(stylesData: any, documentInfo: any): any[] {
 }
 
 /**
- * Analiza y categoriza componentes
- */
-function analyzeComponents(componentsData: any, detailLevel: string): any {
-  if (!Array.isArray(componentsData) || componentsData.length === 0) {
-    return {
-      atomic: [],
-      composite: [],
-      patterns: []
-    };
-  }
-  
-  const atomic = [];
-  const composite = [];
-  const patterns = [];
-  
-  // Categorizar componentes
-  for (const component of componentsData) {
-    // Determinar si es atómico, compuesto o patrón
-    let category = 'atomic';
-    let description = '';
-    
-    // Si tiene muchos hijos, probablemente es compuesto o un patrón
-    if (component.children && component.children.length > 3) {
-      category = 'composite';
-      
-      // Identificar si es un patrón conocido (card, form, navigation, etc.)
-      if (/card|tarjeta/i.test(component.name)) {
-        category = 'pattern';
-        description = 'Patrón de tarjeta para mostrar contenido agrupado';
-      } else if (/form|formulario/i.test(component.name)) {
-        category = 'pattern';
-        description = 'Patrón de formulario para entrada de datos';
-      } else if (/nav|menu|navegación/i.test(component.name)) {
-        category = 'pattern';
-        description = 'Patrón de navegación';
-      } else if (/list|lista/i.test(component.name)) {
-        category = 'pattern';
-        description = 'Patrón de lista para mostrar colecciones de elementos';
-      } else if (/table|tabla/i.test(component.name)) {
-        category = 'pattern';
-        description = 'Patrón de tabla para mostrar datos estructurados';
-      } else if (/modal|dialog|diálogo/i.test(component.name)) {
-        category = 'pattern';
-        description = 'Patrón de modal o diálogo';
-      } else if (/button|botón|btn/i.test(component.name)) {
-        category = 'atomic';
-        description = 'Componente atómico de botón';
-      }
-    } else {
-      // Identificar componentes atómicos por nombre
-      if (/button|botón|btn/i.test(component.name)) {
-        description = 'Componente atómico de botón';
-      } else if (/input|entrada/i.test(component.name)) {
-        description = 'Componente atómico de entrada de texto';
-      } else if (/icon|ícono/i.test(component.name)) {
-        description = 'Componente atómico de ícono';
-      } else if (/badge|insignia/i.test(component.name)) {
-        description = 'Componente atómico de insignia o badge';
-      } else if (/checkbox|check/i.test(component.name)) {
-        description = 'Componente atómico de checkbox';
-      } else if (/radio/i.test(component.name)) {
-        description = 'Componente atómico de radio button';
-      }
-    }
-    
-    const componentInfo = {
-      id: component.id,
-      name: component.name,
-      description: description || `Componente ${category}`,
-      type: component.type,
-      width: component.absoluteBoundingBox ? component.absoluteBoundingBox.width : null,
-      height: component.absoluteBoundingBox ? component.absoluteBoundingBox.height : null,
-      childrenCount: component.children ? component.children.length : 0
-    };
-    
-    // Añadir a la categoría correspondiente
-    if (category === 'atomic') {
-      atomic.push(componentInfo);
-    } else if (category === 'composite') {
-      composite.push(componentInfo);
-    } else if (category === 'pattern') {
-      patterns.push(componentInfo);
-    }
-  }
-  
-  return {
-    atomic,
-    composite,
-    patterns
-  };
-}
-
-/**
- * Evalúa la consistencia del sistema de diseño
- */
-function evaluateConsistency(
-  colorTokens: any[], 
-  typographyTokens: any[], 
-  spacingTokens: any[], 
-  shadowTokens: any[], 
-  radiiTokens: any[],
-  components: any
-): any {
-  const issues = [];
-  let score = 100; // Comenzamos con puntuación perfecta
-  
-  // Validar colores
-  if (colorTokens.length === 0) {
-    issues.push('No se encontraron estilos de color definidos');
-    score -= 20;
-  } else if (colorTokens.length < 5) {
-    issues.push('Pocos estilos de color definidos, el sistema podría no ser completo');
-    score -= 10;
-  }
-  
-  // Validar tipografía
-  if (typographyTokens.length === 0) {
-    issues.push('No se encontraron estilos tipográficos definidos');
-    score -= 20;
-  } else if (typographyTokens.length < 3) {
-    issues.push('Pocos estilos tipográficos definidos, el sistema podría carecer de jerarquía');
-    score -= 10;
-  }
-  
-  // Validar espaciado
-  if (spacingTokens.length === 0) {
-    issues.push('No se pudieron identificar tokens de espaciado consistentes');
-    score -= 15;
-  }
-  
-  // Validar sombras
-  if (shadowTokens.length === 0) {
-    issues.push('No se encontraron estilos de sombras definidos');
-    score -= 10;
-  }
-  
-  // Validar radios
-  if (radiiTokens.length === 0) {
-    issues.push('No se pudieron identificar tokens de radio de borde consistentes');
-    score -= 10;
-  }
-  
-  // Validar componentes
-  if (components.atomic.length === 0 && components.composite.length === 0) {
-    issues.push('No se encontraron componentes definidos');
-    score -= 15;
-  }
-  
-  // Limitar puntuación mínima a 0
-  score = Math.max(0, score);
-  
-  return {
-    score,
-    issues
-  };
-}
-
-/**
- * Genera sugerencias de implementación basadas en el análisis
- */
-function generateImplementationSuggestions(
-  colorTokens: any[], 
-  typographyTokens: any[], 
-  components: any
-): any {
-  // Determinar framework CSS más adecuado
-  let cssFramework = 'tailwind';
-  let componentLibrary = 'none';
-  let tokenFormat = 'css';
-  
-  // Si hay muchos componentes complejos, sugerir un framework de componentes
-  if (components.composite.length > 5 || components.patterns.length > 3) {
-    componentLibrary = 'custom-components';
-    
-    // Sugerir biblioteca de componentes basada en patrones
-    if (components.patterns.some((p: any) => /form|formulario/i.test(p.name))) {
-      componentLibrary = 'react-hook-form';
-    }
-  }
-  
-  // Si hay muchos estilos de color y tipografía, sugerir tokens de diseño
-  if (colorTokens.length > 8 || typographyTokens.length > 6) {
-    tokenFormat = 'designTokens';
-  }
-  
-  return {
-    cssFramework,
-    componentLibrary,
-    tokenFormat,
-    recommendations: [
-      "Implementar los tokens de diseño como variables CSS o en un sistema de tokens",
-      "Utilizar un sistema tipo Scale para mantener consistencia en espaciados y tipografía",
-      "Desarrollar componentes atómicos reutilizables antes de construir patrones complejos"
-    ]
-  };
-}
-
-/**
- * Extrae tokens de diseño según los tipos especificados
- */
-function extractTokens(nodeInfo: any, stylesData: any, tokenTypes: string[]): any {
-  const tokens: Record<string, any[]> = {};
-  
-  // Extraer cada tipo de token solicitado
-  for (const tokenType of tokenTypes) {
-    switch (tokenType) {
-      case 'colors':
-        tokens.colors = extractColorTokens(stylesData);
-        break;
-      case 'typography':
-        tokens.typography = extractTypographyTokens(stylesData);
-        break;
-      case 'spacing':
-        tokens.spacing = extractSpacingTokens(nodeInfo, 'detailed');
-        break;
-      case 'shadows':
-        tokens.shadows = extractShadowTokens(stylesData);
-        break;
-      case 'radii':
-        tokens.radii = extractRadiiTokens(stylesData, nodeInfo);
-        break;
-    }
-  }
-  
-  return tokens;
-}
-
-/**
  * Genera código de tokens en diferentes formatos
  */
 function generateTokenCode(tokens: Record<string, any[]>, format: string): Record<string, string> {
@@ -704,6 +586,7 @@ function generateCssTokens(tokens: Record<string, any[]>): string {
     tokens[tokenType].forEach(token => {
       const tokenName = `--${token.category ? `${token.category}-` : ''}${token.name}`;
       let tokenValue = '';
+      let skipMainAssignment = false;  // Flag para controlar si saltamos la asignación general
       
       switch (token.type) {
         case 'color':
@@ -728,7 +611,8 @@ function generateCssTokens(tokens: Record<string, any[]>): string {
           if (token.value.letterSpacing) {
             cssCode += `  ${tokenName}-letter-spacing: ${token.value.letterSpacing};\n`;
           }
-          continue; // Saltar la asignación general para tipografía
+          skipMainAssignment = true;  // Marcamos para saltar la asignación general
+          break;
         case 'shadow':
           if (token.value.type === 'dropShadow') {
             tokenValue = `${token.value.x} ${token.value.y} ${token.value.blur} ${token.value.spread} ${token.value.color}`;
@@ -740,8 +624,8 @@ function generateCssTokens(tokens: Record<string, any[]>): string {
           tokenValue = token.value;
       }
       
-      // Si no es un token de tipografía, añadir la variable
-      if (token.type !== 'typography') {
+      // Si no debemos saltar la asignación general, añadir la variable
+      if (!skipMainAssignment) {
         cssCode += `  ${tokenName}: ${tokenValue};\n`;
       }
     });
@@ -1025,4 +909,458 @@ function calculateTokenStatistics(tokens: Record<string, any[]>): any {
     coverage: Math.round(coverage),
     timestamp: new Date().toISOString()
   };
+}
+
+/**
+ * Analiza la información del documento, estilos y componentes para identificar el sistema de diseño
+ * Esta es la función auxiliar que faltaba y causaba el error
+ */
+function analyzeDesignSystem(documentInfo: any, stylesData: any, componentsData: any, detailLevel: string): any {
+  try {
+    // Inicializar estructura de respuesta
+    const designSystemAnalysis = {
+      document: {
+        id: documentInfo.id,
+        name: documentInfo.name,
+        type: documentInfo.type,
+        pageCount: documentInfo.pages ? documentInfo.pages.length : 1
+      },
+      designSystem: {
+        tokens: {},
+        components: [],
+        patterns: [],
+        consistency: {
+          score: 0,
+          analysis: []
+        },
+        recommendations: []
+      },
+      statistics: {
+        tokenCount: 0,
+        componentCount: 0,
+        patternCount: 0,
+        consistencyScore: 0,
+        completenessScore: 0,
+        timestamp: new Date().toISOString()
+      },
+      meta: {
+        detailLevel,
+        includesComponents: componentsData !== null,
+      }
+    };
+
+    // Analizar y extraer tokens de diseño de los estilos
+    const tokenTypes = ["colors", "typography", "spacing", "shadows", "radii"];
+    designSystemAnalysis.designSystem.tokens = extractTokens(documentInfo, stylesData, tokenTypes);
+    
+    // Contar tokens
+    let tokenCount = 0;
+    for (const tokenType in designSystemAnalysis.designSystem.tokens) {
+      if (Array.isArray(designSystemAnalysis.designSystem.tokens[tokenType])) {
+        tokenCount += designSystemAnalysis.designSystem.tokens[tokenType].length;
+      }
+    }
+    designSystemAnalysis.statistics.tokenCount = tokenCount;
+    
+    // Analizar componentes si están disponibles
+    if (componentsData && componentsData.components) {
+      designSystemAnalysis.statistics.componentCount = componentsData.components.length;
+      
+      // Analizar solo en detalle si se solicita un análisis completo
+      if (detailLevel === "comprehensive") {
+        // Agrupar componentes por categorías semánticas
+        const componentCategories = analyzeComponentCategories(componentsData.components);
+        
+        // Identificar patrones de diseño a partir de los componentes
+        designSystemAnalysis.designSystem.patterns = identifyDesignPatterns(componentsData.components, documentInfo);
+        designSystemAnalysis.statistics.patternCount = designSystemAnalysis.designSystem.patterns.length;
+        
+        // Estructurar información de componentes
+        designSystemAnalysis.designSystem.components = componentCategories.map((category) => {
+          return {
+            category: category.name,
+            components: category.components.map((comp) => ({
+              id: comp.id,
+              name: comp.name,
+              type: comp.type,
+              variantCount: comp.type === "COMPONENT_SET" ? (comp.children?.length || 0) : 0,
+            }))
+          };
+        });
+      } else {
+        // Para análisis básico o detallado, solo incluir conteo y lista
+        designSystemAnalysis.designSystem.components = componentsData.components.map((comp) => ({
+          id: comp.id,
+          name: comp.name,
+          key: comp.key
+        }));
+      }
+    }
+    
+    // Evaluar la consistencia del sistema de diseño
+    const consistencyAnalysis = evaluateDesignSystemConsistency(
+      designSystemAnalysis.designSystem.tokens,
+      designSystemAnalysis.statistics.componentCount,
+      tokenCount
+    );
+    
+    designSystemAnalysis.designSystem.consistency = consistencyAnalysis;
+    designSystemAnalysis.statistics.consistencyScore = consistencyAnalysis.score;
+    
+    // Calcular completitud del sistema de diseño
+    const completenessScore = calculateCompleteness(
+      designSystemAnalysis.designSystem.tokens,
+      designSystemAnalysis.statistics.componentCount,
+      detailLevel
+    );
+    designSystemAnalysis.statistics.completenessScore = completenessScore;
+    
+    return designSystemAnalysis;
+  } catch (error) {
+    console.error("Error en analyzeDesignSystem:", error);
+    return {
+      error: `Error al analizar sistema de diseño: ${error instanceof Error ? error.message : String(error)}`,
+      document: {
+        id: documentInfo.id,
+        name: documentInfo.name
+      }
+    };
+  }
+}
+
+/**
+ * Analiza componentes y los agrupa en categorías semánticas
+ */
+function analyzeComponentCategories(components: any[]): any[] {
+  // Mapa para agrupar componentes por categorías
+  const categoriesMap: Record<string, any[]> = {};
+  
+  components.forEach((component) => {
+    // Intentar determinar categoría a partir del nombre
+    let categoryName = "General";
+    
+    // Dividir por separadores comunes
+    const nameParts = component.name.split(/[\/\-_\s]/);
+    
+    // Buscar categorías comunes en el nombre
+    const commonCategories = [
+      "button", "input", "form", "card", "nav", "header", "footer", "modal", "dialog",
+      "icon", "typography", "menu", "list", "table", "chart", "image", "avatar"
+    ];
+    
+    for (const part of nameParts) {
+      const lowercasePart = part.toLowerCase();
+      if (commonCategories.includes(lowercasePart) || 
+          commonCategories.some(cat => lowercasePart.includes(cat))) {
+        categoryName = lowercasePart.charAt(0).toUpperCase() + lowercasePart.slice(1);
+        break;
+      }
+    }
+    
+    // Si el nombre incluye "property" o "variant", es probablemente parte de un set de componentes
+    if (component.name.toLowerCase().includes("property") || 
+        component.name.toLowerCase().includes("variant")) {
+      categoryName = "Variants";
+    }
+    
+    // Crear categoría si no existe
+    if (!categoriesMap[categoryName]) {
+      categoriesMap[categoryName] = [];
+    }
+    
+    // Añadir componente a su categoría
+    categoriesMap[categoryName].push(component);
+  });
+  
+  // Convertir mapa a array
+  return Object.keys(categoriesMap).map(name => ({
+    name,
+    components: categoriesMap[name]
+  }));
+}
+
+/**
+ * Identifica patrones de diseño a partir de los componentes
+ */
+function identifyDesignPatterns(components: any[], documentInfo: any): any[] {
+  const patterns = [];
+  
+  // Analizar para identificar patrones comunes
+  
+  // Patrón: Sistema de botones
+  const buttonComponents = components.filter(comp => 
+    comp.name.toLowerCase().includes("button") ||
+    (comp.type === "COMPONENT_SET" && comp.children?.some(c => c.name.toLowerCase().includes("button")))
+  );
+  
+  if (buttonComponents.length > 0) {
+    patterns.push({
+      name: "Button System",
+      type: "UI Component",
+      elements: buttonComponents.length,
+      description: `Sistema de botones con ${buttonComponents.length} variantes o estados`,
+      components: buttonComponents.map(c => c.id)
+    });
+  }
+  
+  // Patrón: Sistema tipográfico
+  const typographyComponents = components.filter(comp => 
+    comp.name.toLowerCase().includes("text") ||
+    comp.name.toLowerCase().includes("heading") ||
+    comp.name.toLowerCase().includes("title") ||
+    comp.name.toLowerCase().includes("paragraph") ||
+    comp.type === "TEXT"
+  );
+  
+  if (typographyComponents.length > 0) {
+    patterns.push({
+      name: "Typography System",
+      type: "Text Styles",
+      elements: typographyComponents.length,
+      description: `Sistema tipográfico con ${typographyComponents.length} elementos`,
+      components: typographyComponents.map(c => c.id)
+    });
+  }
+  
+  // Otros patrones que podrían detectarse: formularios, navegación, tarjetas, etc.
+  
+  return patterns;
+}
+
+/**
+ * Evalúa la consistencia del sistema de diseño
+ */
+function evaluateDesignSystemConsistency(tokens: any, componentCount: number, tokenCount: number): any {
+  // Inicializar análisis de consistencia
+  const consistencyAnalysis = {
+    score: 0,
+    analysis: []
+  };
+  
+  // Verificar tokens disponibles
+  const hasColors = tokens.colors && tokens.colors.length > 0;
+  const hasTypography = tokens.typography && tokens.typography.length > 0;
+  const hasSpacing = tokens.spacing && tokens.spacing.length > 0;
+  const hasShadows = tokens.shadows && tokens.shadows.length > 0;
+  const hasRadii = tokens.radii && tokens.radii.length > 0;
+  
+  // Puntos base por tener tokens fundamentales
+  let consistencyScore = 0;
+  consistencyScore += hasColors ? 25 : 0;
+  consistencyScore += hasTypography ? 25 : 0;
+  consistencyScore += hasSpacing ? 15 : 0;
+  consistencyScore += hasShadows ? 10 : 0;
+  consistencyScore += hasRadii ? 10 : 0;
+  
+  // Añadir análisis de los tokens detectados
+  if (hasColors) {
+    consistencyAnalysis.analysis.push({
+      aspect: "Color System",
+      status: "Detected",
+      details: `${tokens.colors.length} colores definidos`
+    });
+  } else {
+    consistencyAnalysis.analysis.push({
+      aspect: "Color System",
+      status: "Missing",
+      details: "No se detectaron colores definidos formalmente"
+    });
+  }
+  
+  if (hasTypography) {
+    consistencyAnalysis.analysis.push({
+      aspect: "Typography System",
+      status: "Detected",
+      details: `${tokens.typography.length} estilos tipográficos definidos`
+    });
+  } else {
+    consistencyAnalysis.analysis.push({
+      aspect: "Typography System",
+      status: "Missing",
+      details: "No se detectaron estilos tipográficos definidos formalmente"
+    });
+  }
+  
+  if (hasSpacing) {
+    consistencyAnalysis.analysis.push({
+      aspect: "Spacing System",
+      status: "Detected",
+      details: `${tokens.spacing.length} valores de espaciado detectados`
+    });
+  } else {
+    consistencyAnalysis.analysis.push({
+      aspect: "Spacing System",
+      status: "Missing",
+      details: "No se detectaron valores de espaciado consistentes"
+    });
+  }
+  
+  // Puntos adicionales por número de componentes
+  if (componentCount > 0) {
+    consistencyScore += Math.min(15, componentCount);
+    consistencyAnalysis.analysis.push({
+      aspect: "Component Library",
+      status: "Detected",
+      details: `${componentCount} componentes definidos`
+    });
+  } else {
+    consistencyAnalysis.analysis.push({
+      aspect: "Component Library",
+      status: "Missing",
+      details: "No se detectaron componentes reutilizables"
+    });
+  }
+  
+  // Limitar la puntuación a 100
+  consistencyScore = Math.min(100, consistencyScore);
+  
+  // Asignar clasificación general
+  let consistencyLevel = "Undefined";
+  if (consistencyScore >= 85) consistencyLevel = "High";
+  else if (consistencyScore >= 60) consistencyLevel = "Medium";
+  else if (consistencyScore >= 30) consistencyLevel = "Low";
+  else consistencyLevel = "Very Low";
+  
+  consistencyAnalysis.score = consistencyScore;
+  consistencyAnalysis.level = consistencyLevel;
+  
+  return consistencyAnalysis;
+}
+
+/**
+ * Calcula la completitud del sistema de diseño
+ */
+function calculateCompleteness(tokens: any, componentCount: number, detailLevel: string): number {
+  // Definir puntos máximos según nivel de detalle
+  const maxPoints = detailLevel === "comprehensive" ? 100 : 
+                    detailLevel === "detailed" ? 80 : 60;
+  
+  // Contar elementos disponibles
+  let availablePoints = 0;
+  
+  // Puntos por tokens de color
+  if (tokens.colors && tokens.colors.length > 0) {
+    availablePoints += Math.min(20, 5 + tokens.colors.length);
+  }
+  
+  // Puntos por tokens tipográficos
+  if (tokens.typography && tokens.typography.length > 0) {
+    availablePoints += Math.min(20, 5 + tokens.typography.length);
+  }
+  
+  // Puntos por tokens de espaciado
+  if (tokens.spacing && tokens.spacing.length > 0) {
+    availablePoints += Math.min(15, 5 + tokens.spacing.length);
+  }
+  
+  // Puntos por tokens de sombras
+  if (tokens.shadows && tokens.shadows.length > 0) {
+    availablePoints += Math.min(10, tokens.shadows.length * 2);
+  }
+  
+  // Puntos por tokens de radios
+  if (tokens.radii && tokens.radii.length > 0) {
+    availablePoints += Math.min(10, tokens.radii.length * 2);
+  }
+  
+  // Puntos por componentes
+  availablePoints += Math.min(25, componentCount);
+  
+  // Calcular porcentaje de completitud
+  return Math.round((availablePoints / maxPoints) * 100);
+}
+
+/**
+ * Infiere estilos analizando el documento
+ */
+function inferStylesFromDocument(documentInfo: any): any {
+  // Inicializar resultados
+  const inferredStyles = {
+    colors: [],
+    effects: [],
+    grids: []
+  };
+  
+  // Conjunto para almacenar colores únicos
+  const uniqueColors = new Set<string>();
+  
+  // Función recursiva para extraer colores y efectos
+  const extractVisualProperties = (node: any) => {
+    if (!node) return;
+    
+    // Extraer colores de rellenos
+    if (node.fills && Array.isArray(node.fills)) {
+      node.fills.forEach((fill: any) => {
+        if (fill.type === 'SOLID' && fill.color) {
+          // Convertir a HEX para identificación única
+          const r = Math.round(fill.color.r * 255);
+          const g = Math.round(fill.color.g * 255);
+          const b = Math.round(fill.color.b * 255);
+          const hexColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+          
+          // Añadir si es único
+          if (!uniqueColors.has(hexColor)) {
+            uniqueColors.add(hexColor);
+            
+            // Inferir nombre semántico basado en el color
+            let inferredName = '';
+            
+            // Detectar blancos y negros
+            if (r > 240 && g > 240 && b > 240) inferredName = 'white';
+            else if (r < 15 && g < 15 && b < 15) inferredName = 'black';
+            // Detectar grises
+            else if (Math.abs(r - g) < 20 && Math.abs(r - b) < 20 && Math.abs(g - b) < 20) {
+              inferredName = r < 128 ? 'darkGrey' : 'lightGrey';
+            }
+            // Detectar colores primarios
+            else if (r > 200 && g < 100 && b < 100) inferredName = 'red';
+            else if (r < 100 && g > 200 && b < 100) inferredName = 'green';
+            else if (r < 100 && g < 100 && b > 200) inferredName = 'blue';
+            // Otros colores comunes
+            else if (r > 200 && g > 150 && b < 100) inferredName = 'yellow';
+            else if (r > 150 && g < 100 && b > 150) inferredName = 'purple';
+            else if (r < 100 && g > 150 && b > 150) inferredName = 'cyan';
+            else inferredName = `color${inferredStyles.colors.length + 1}`;
+            
+            inferredStyles.colors.push({
+              id: `inferred-${hexColor.replace('#', '')}`,
+              name: inferredName,
+              paints: [{
+                type: 'SOLID',
+                color: {
+                  r: fill.color.r,
+                  g: fill.color.g,
+                  b: fill.color.b
+                },
+                opacity: fill.opacity || 1
+              }]
+            });
+          }
+        }
+      });
+    }
+    
+    // Extraer efectos (sombras)
+    if (node.effects && Array.isArray(node.effects) && node.effects.length > 0) {
+      node.effects.forEach((effect: any, index: number) => {
+        if (effect.type === 'DROP_SHADOW' || effect.type === 'INNER_SHADOW') {
+          inferredStyles.effects.push({
+            id: `inferred-effect-${inferredStyles.effects.length}`,
+            name: effect.type === 'DROP_SHADOW' ? `dropShadow${index + 1}` : `innerShadow${index + 1}`,
+            effects: [effect]
+          });
+        }
+      });
+    }
+    
+    // Explorar hijos recursivamente
+    if (node.children && node.children.length > 0) {
+      node.children.forEach(extractVisualProperties);
+    }
+  };
+  
+  // Iniciar extracción recursiva
+  extractVisualProperties(documentInfo);
+  
+  return inferredStyles;
 }
