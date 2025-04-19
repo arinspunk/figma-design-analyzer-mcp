@@ -1,18 +1,18 @@
-# Claude Talk to Figma MCP
+# Figma Design Analyzer MCP
 
-A Model Context Protocol (MCP) plugin that allows Claude Desktop to interact directly with Figma, enabling powerful AI-assisted design capabilities.
+A Model Context Protocol (MCP) plugin that allows Claude Desktop to interact directly with Figma, enabling powerful AI-assisted design analysis capabilities.
 
 > **Important**: This project is based on [cursor-talk-to-figma-mcp](https://github.com/sonnylazuardi/cursor-talk-to-figma-mcp) by Sonny Lazuardi. It has been adapted to work with Claude Desktop instead of Cursor. The original implementation and main credit belongs to Sonny Lazuardi ❤️
 
 ## 🚀 Features
 
 - **Native Claude Integration**: Allows Claude to communicate with Figma through the Model Context Protocol (MCP)
-- **Powerful Commands**: Manipulate objects in Figma, get information, create and modify elements
-- **Advanced Text & Font Control**: Comprehensive text styling capabilities including font selection, spacing, and text effects
+- **Powerful Analysis**: Extract design information, scan text nodes, and analyze components
+- **Advanced Text & Font Analysis**: Comprehensive text styling analysis including font details, spacing, and text effects
 - **Bidirectional Communication**: Real-time WebSocket channel between Claude and Figma
-- **Fluid Experience**: Design with AI as your assistant, accelerating creative workflows
-- **Text Scanning**: Identify and manipulate text nodes within Figma documents
-- **Remote Components**: Access and utilize components from team libraries
+- **Fluid Experience**: Analyze designs with AI as your assistant, accelerating design-to-code workflows
+- **Text Scanning**: Identify and analyze text nodes within Figma documents
+- **Component Analysis**: Access and analyze components from local and team libraries
 
 ## 📋 Prerequisites
 
@@ -53,7 +53,7 @@ A Model Context Protocol (MCP) plugin that allows Claude Desktop to interact dir
      - On macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
      - On Windows: `%APPDATA%\Claude\claude_desktop_config.json`
    - Creates a backup of the existing configuration file
-   - Modifies or creates the configuration file to include "ClaudeTalkToFigma" in the list of MCPs
+   - Modifies or creates the configuration file to include "FigmaDesignAnalyzer" in the list of MCPs
    - Configures the command that Claude Desktop should execute to start the MCP
 
 5. Install the Figma plugin:
@@ -89,7 +89,7 @@ Once installed, you just need to start it:
 
 4. **Claude Desktop**:
 
-   Open Claude Desktop and confirm that "ClaudeTalkToFigma" appears in the MCPs selector.
+   Open Claude Desktop and confirm that "FigmaDesignAnalyzer" appears in the MCPs selector.
 
 5. **Ready to use!**
 
@@ -97,7 +97,7 @@ Once installed, you just need to start it:
 
 ### 🧠 Prompting
 
-1. Before you start designing with Claude, [make it an expert in UX/UI](prompts/prompt-ux-ui-specialist.md) 🎨
+1. Before you start analyzing with Claude, [make it an expert in UX/UI](prompts/prompt-ux-ui-specialist.md) 🎨
    
    > **Note**: Also in [Galician](prompts/prompt-ux-ui-especialista-gal.md), [Português](prompts/prompt-ux-ui-especialista-pt.md) and [Español](prompts/prompt-ux-ui-especialista-es.md).
 
@@ -119,7 +119,7 @@ Once installed, you just need to start it:
 
 ## 🛠️ Available Commands
 
-As Claude is connected to our MCP, it already knows the list of tools to manipulate Figma. But if you want, you can mention them in your prompts:  
+As Claude is connected to our MCP, it already knows the list of tools to analyze Figma. But if you want, you can mention them in your prompts:  
 
 ### Basic Commands
 - `clone_node`  
@@ -235,7 +235,7 @@ If you encounter problems, check the following common issues:
 - **Connection Error**: Make sure the WebSocket server is running with `bun socket`
 - **Plugin Not Appearing**: Verify that you've correctly linked the plugin folder in Figma Development settings
 - **Claude Can't Find the MCP**: Make sure you've run `bun run configure-claude` and restarted Claude Desktop
-- **Claude Not Responding**: Confirm you've selected "ClaudeTalkToFigma" in the MCPs menu
+- **Claude Not Responding**: Confirm you've selected "FigmaDesignAnalyzer" in the MCPs menu
 - **Execution Errors**: Check the Figma development console for detailed messages
 - **Font Loading Issues**: Some fonts might not be available in Figma. Use `load_font_async` to verify font availability
 - **Remote Components Error**: Team libraries might require proper permissions in Figma. Ensure you have access to the libraries you're trying to use

@@ -1,6 +1,6 @@
 {
-  "name": "Claude MCP Plugin",
-  "id": "claude-mcp-plugin",
+  "name": "Figma Design Analyzer",
+  "id": "figma-design-analyzer-mcp",
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
