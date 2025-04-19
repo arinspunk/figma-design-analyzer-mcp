@@ -35,3 +35,5 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+src/talk_to_figma_mcp/tools/analysis-tools.back.ts
